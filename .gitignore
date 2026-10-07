@@ -1,0 +1,8 @@
+# Zephyr build output
+build/
+build-*/
+
+# Editor and OS files
+.vscode/
+*.swp
+.DS_Store

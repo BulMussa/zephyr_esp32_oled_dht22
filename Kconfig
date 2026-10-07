@@ -1,0 +1,22 @@
+mainmenu "Poko"
+
+# Both animations are built in and can be switched from the web page;
+# this only picks the one shown after power-up.
+choice APP_ANIMATION
+	prompt "Animation shown at power-up"
+	default APP_ANIMATION_PONG
+
+config APP_ANIMATION_PONG
+	bool "Pong"
+	help
+	  Two computer-controlled paddles playing Pong, with the score in
+	  the yellow area.
+
+config APP_ANIMATION_SINE
+	bool "Scrolling sine wave"
+	help
+	  A sine wave graph that slides continuously to the right.
+
+endchoice
+
+source "Kconfig.zephyr"

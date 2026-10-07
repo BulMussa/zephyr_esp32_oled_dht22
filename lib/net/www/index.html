@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Poko</title>
+<style>
+:root {
+  --bg: #eef2f5; --card: #fff; --fg: #15202b; --muted: #5d6b78; --line: #d3dbe2;
+  --blue: #1f76c2; --yellow: #b88a00; --ok: #2e8b57; --bad: #c0392b;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1217; --card: #161e26; --fg: #e3e9ef; --muted: #8e9cab; --line: #2a3541;
+    --blue: #59b2f0; --yellow: #e8c547; --ok: #4cc28a; --bad: #ef7c66;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 480px; margin: 0 auto; padding: 20px 16px 40px; display: grid; gap: 14px; }
+header { display: flex; align-items: center; justify-content: space-between; }
+h1 { margin: 0; font-size: 26px; letter-spacing: 0.02em; }
+.link { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.dot.on { background: var(--ok); }
+.dot.off { background: var(--bad); }
+.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.value { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.value.temp { color: var(--yellow); }
+.sub { font-size: 13px; color: var(--muted); }
+fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 10px; }
+legend { padding: 0; margin-bottom: 10px; }
+.opt { display: flex; align-items: center; gap: 14px; padding: 12px; border: 2px solid var(--line);
+  border-radius: 10px; cursor: pointer; }
+.opt:has(input:checked) { border-color: var(--blue); }
+.opt input { width: 20px; height: 20px; accent-color: var(--blue); margin: 0; }
+.opt svg { flex: none; width: 72px; height: 36px; border-radius: 4px; background: #04070a; }
+.opt .name { font-weight: 600; }
+.badge { font-size: 11px; font-weight: 600; color: var(--blue); border: 1px solid var(--blue);
+  border-radius: 99px; padding: 1px 8px; margin-left: auto; }
+button { width: 100%; margin-top: 14px; padding: 13px; font: inherit; font-weight: 650;
+  color: #fff; background: var(--blue); border: 0; border-radius: 10px; cursor: pointer; }
+button:disabled { opacity: 0.45; cursor: default; }
+button:focus-visible, .opt:focus-within { outline: 2px solid var(--blue); outline-offset: 2px; }
+#msg { min-height: 1.5em; margin: 10px 0 0; font-size: 14px; color: var(--muted); }
+#msg.err { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Poko</h1>
+    <span class="link"><span class="dot" id="dot"></span><span id="link">Connecting…</span></span>
+  </header>
+
+  <div class="stats">
+    <section class="card">
+      <div class="label">Running for</div>
+      <div class="value" id="uptime">–</div>
+      <div class="sub">since power-up</div>
+    </section>
+    <section class="card">
+      <div class="label">Temperature</div>
+      <div class="value temp" id="temp">–</div>
+      <div class="sub" id="temp-sub">DHT22 sensor</div>
+    </section>
+  </div>
+
+  <form class="card" id="form">
+    <fieldset>
+      <legend class="label">Display animation</legend>
+      <label class="opt">
+        <input type="radio" name="anim" value="pong" id="anim-pong">
+        <svg viewBox="0 0 72 36" aria-hidden="true">
+          <rect x="0" y="0" width="72" height="8" fill="#f4cf45" opacity=".25"/>
+          <rect x="4" y="13" width="2" height="9" fill="#4cb2f2"/>
+          <rect x="66" y="18" width="2" height="9" fill="#4cb2f2"/>
+          <rect x="40" y="20" width="3" height="3" fill="#4cb2f2"/>
+          <path d="M36 10v24" stroke="#4cb2f2" stroke-dasharray="2 2"/>
+        </svg>
+        <span class="name">Pong</span>
+        <span class="badge" id="now-pong" hidden>On screen</span>
+      </label>
+      <label class="opt">
+        <input type="radio" name="anim" value="sine" id="anim-sine">
+        <svg viewBox="0 0 72 36" aria-hidden="true">
+          <rect x="0" y="0" width="72" height="8" fill="#f4cf45" opacity=".25"/>
+          <path d="M0 22h72" stroke="#4cb2f2" stroke-dasharray="1 2" opacity=".6"/>
+          <path d="M0 22q9-22 18 0t18 0 18 0 18 0" fill="none" stroke="#4cb2f2" stroke-width="1.5"/>
+        </svg>
+        <span class="name">Sine wave</span>
+        <span class="badge" id="now-sine" hidden>On screen</span>
+      </label>
+    </fieldset>
+    <button type="submit" id="apply" disabled>Apply</button>
+    <p id="msg" role="status"></p>
+  </form>
+</main>
+
+<script>
+var NAMES = { pong: "Pong", sine: "Sine wave" };
+var current = null;        // animation the board reports
+var dirty = false;         // user picked something but has not applied it
+var uptimeBase = null;     // { ms, at } from the last status reply
+
+function $(id) { return document.getElementById(id); }
+
+function fmtUptime(ms) {
+  var s = Math.floor(ms / 1000);
+  var d = Math.floor(s / 86400), h = Math.floor(s / 3600) % 24;
+  var m = Math.floor(s / 60) % 60, sec = s % 60;
+  function p(n) { return (n < 10 ? "0" : "") + n; }
+  return (d > 0 ? d + "d " : "") + p(h) + ":" + p(m) + ":" + p(sec);
+}
+
+function selected() {
+  var r = document.querySelector('input[name="anim"]:checked');
+  return r ? r.value : null;
+}
+
+function updateButton() {
+  $("apply").disabled = !selected() || selected() === current;
+}
+
+function setLink(ok) {
+  $("dot").className = "dot " + (ok ? "on" : "off");
+  $("link").textContent = ok ? "Connected" : "No connection to Poko";
+}
+
+function applyStatus(st) {
+  uptimeBase = { ms: st.uptime_ms, at: Date.now() };
+  if (st.temp_c === null) {
+    $("temp").textContent = "–";
+    $("temp-sub").textContent = "Waiting for sensor";
+  } else {
+    $("temp").textContent = st.temp_c.toFixed(1) + " °C";
+    $("temp-sub").textContent = "DHT22, every 5 s";
+  }
+  current = st.animation;
+  for (var k in NAMES) $("now-" + k).hidden = (k !== current);
+  if (!dirty && $("anim-" + current)) $("anim-" + current).checked = true;
+  updateButton();
+}
+
+function poll() {
+  fetch("/api/status", { cache: "no-store" })
+    .then(function (r) { if (!r.ok) throw r; return r.json(); })
+    .then(function (st) { setLink(true); applyStatus(st); })
+    .catch(function () { setLink(false); });
+}
+
+setInterval(function () {
+  if (uptimeBase) $("uptime").textContent = fmtUptime(uptimeBase.ms + Date.now() - uptimeBase.at);
+}, 250);
+setInterval(poll, 3000);
+poll();
+
+document.querySelectorAll('input[name="anim"]').forEach(function (r) {
+  r.addEventListener("change", function () {
+    dirty = true;
+    $("msg").textContent = "";
+    $("msg").className = "";
+    updateButton();
+  });
+});
+
+$("form").addEventListener("submit", function (e) {
+  e.preventDefault();
+  var want = selected();
+  if (!want) return;
+  $("apply").disabled = true;
+  $("msg").className = "";
+  $("msg").textContent = "Switching…";
+  fetch("/api/animation", { method: "POST", headers: { "Content-Type": "text/plain" }, body: want })
+    .then(function (r) { if (!r.ok) throw r; return r.json(); })
+    .then(function (st) {
+      dirty = false;
+      applyStatus(st);
+      $("msg").textContent = "The display now shows " + NAMES[want] + ".";
+    })
+    .catch(function () {
+      $("msg").className = "err";
+      $("msg").textContent = "Could not switch the animation. Check that you are still connected to Poko and try again.";
+      updateButton();
+    });
+});
+</script>
+</body>
+</html>

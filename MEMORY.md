@@ -14,8 +14,9 @@ sentinel).
 | SRAM (`sram0_0_seg`) | 320,608 B (313 KB) | 509,456 B (497.5 KB) | 62.9 % | 188,848 B (184 KB) |
 | LP RAM (`lp_ram_seg`) | 0 B | 15,584 B | 0 % | all |
 
-The SRAM figure counts the whole 128 KB heap as used. How much of the heap
-the Wi-Fi driver really needs is only visible at runtime (see
+The SRAM figure counts the whole 128 KB heap as used. Measured on the
+board, the heap peaks at 48.8 KB with a phone connected, and every thread
+stack stays at or below 80 % (see
 [Runtime measurements](#runtime-measurements)).
 
 ## Flash
@@ -116,7 +117,8 @@ buffers and up to 32 dynamic RX and 32 dynamic TX buffers.
 | Wi-Fi timer task | 1,536 B | Espressif Wi-Fi adapter |
 | Idle | 512 B | `CONFIG_IDLE_STACK_SIZE` |
 
-Not included: the Espressif Wi-Fi tasks, whose stacks come from the heap.
+Not included: the Espressif Wi-Fi task (`wifi`, 3,584 B), whose stack
+is allocated from the heap at runtime.
 
 ### Largest other RAM users
 
@@ -134,31 +136,80 @@ Not included: the Espressif Wi-Fi tasks, whose stacks come from the heap.
 
 ## Runtime measurements
 
-Static analysis cannot show how much of the heap and of each stack is
-actually used. The firmware has a shell on the USB console
-(`/dev/ttyACM0`, 115200 baud) for this:
+Measured on the board on 2026-10-08 with the shell on the USB console
+(`/dev/ttyACM0`, 115200 baud):
 
-- `kernel thread stacks`: size, used and unused bytes per thread.
-  Needs `CONFIG_INIT_STACKS` and `CONFIG_THREAD_STACK_INFO` (enabled).
-- `kernel heap`: free, allocated and maximum allocated heap bytes since
-  boot. Needs `CONFIG_SYS_HEAP_RUNTIME_STATS=y`.
+- `kernel heap`: free, allocated and peak heap bytes since boot. Needs
+  `CONFIG_SYS_HEAP_RUNTIME_STATS=y`.
+- `kernel thread stacks`: size and peak use per thread. Needs
+  `CONFIG_INIT_STACKS` and `CONFIG_THREAD_STACK_INFO`.
 
-Measure after a phone has connected and loaded the web page a few times,
-because the peak heap use happens during the WPA2 handshake and while
-serving pages.
+Two readings: **idle** 25 s after boot with no device connected, and
+**after use** at 165 s, after one phone joined Poko (WPA2), loaded the
+web page several times, switched the animation and kept the page open
+with its 3 s status polling. Peaks are since boot, so the second reading
+covers the whole session.
 
-## Where to save memory if needed
+### Heap (128 KB pool)
 
-1. **Heap:** once `kernel heap` shows the peak, lower
-   `CONFIG_HEAP_MEM_POOL_SIZE` to the peak plus a safety margin (25-30 %).
-2. **Stacks:** shrink stacks that `kernel thread stacks` reports as
-   mostly unused, keeping at least 25 % headroom.
-3. **Debugging options:** shell, logging, thread names and the stack
-   sentinel cost RAM (shell stack, buffers, history) and flash (shell ≈
-   15 KB, log strings). Turn them off for a release build.
-4. **Network limits:** `CONFIG_NET_MAX_CONN` and
+| | Idle | After use |
+| - | ---: | --------: |
+| Allocated now | 40,772 B | 40,960 B |
+| Peak allocated | 43,060 B | **49,924 B (38 %)** |
+| Free now | 89,968 B | 89,760 B |
+
+About 40 KB is allocated permanently once Wi-Fi is up (the Wi-Fi task
+stack, driver buffers and state). A connecting phone adds about 7 KB at
+peak (WPA2 handshake, station state, packet buffers).
+
+The previous 55,576 B default heap left only about 5.6 KB above this
+peak, before allocator overhead and fragmentation, which is why the chip
+halted when a phone connected.
+
+### Thread stacks (peak use)
+
+| Thread | Size | Idle | After use | Old default |
+| ------ | ---: | ---: | --------: | ----------: |
+| `sysworkq` (system work queue) | 2,048 B | 276 B (13 %) | **1,640 B (80 %)** | 1,024 B |
+| `net_socket_service` (DHCP server) | 4,096 B | 612 B (14 %) | 2,516 B (61 %) | 2,400 B |
+| `shell_uart` | 2,048 B | 1,244 B (60 %) | 1,244 B (60 %) | |
+| `wifi` (Espressif, from heap) | 3,584 B | 1,588 B (44 %) | 2,044 B (57 %) | |
+| `rx_q[0]` (network RX) | 2,048 B | 244 B (11 %) | 1,112 B (54 %) | |
+| `http_server_tid` | 3,072 B | 611 B (19 %) | 1,560 B (50 %) | |
+| `tcp_work` | 2,048 B | 276 B (13 %) | 760 B (37 %) | |
+| `idle` | 512 B | 172 B (33 %) | 172 B (33 %) | |
+| `esp32_wifi_event_tid` | 2,048 B | 576 B (28 %) | 612 B (29 %) | |
+| `net_mgmt` (event handler) | 4,096 B | 1,008 B (24 %) | 1,052 B (25 %) | 2,048 B |
+| `esp_timer` | 1,536 B | 364 B (23 %) | 364 B (23 %) | |
+| `main` (display loop) | 4,096 B | 852 B (20 %) | 852 B (20 %) | |
+| `IRQ 00` (interrupts) | 2,048 B | 340 B (16 %) | 340 B (16 %) | |
+
+With one phone, the system work queue (1,640 B) and the socket service
+(2,516 B) both go past their old Zephyr defaults (1,024 B and 2,400 B),
+confirming the stack overflow risk found during the connection crash.
+
+## Conclusions
+
+1. **Heap:** 128 KB is about 2.5 times the measured peak. It could go
+   down to about 80 KB, but the access point allows up to 5 stations and
+   each one adds heap use, so keep it at 128 KB unless the RAM is
+   needed elsewhere. Re-measure with several phones connected before
+   lowering it.
+2. **System work queue:** at 80 % it has the least headroom of any
+   thread (408 B left). Raise `CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE` to
+   3,072 B to keep at least 25 % free with more clients.
+3. **Oversized stacks:** `main` (20 %) and `net_mgmt` (25 %) could each
+   drop from 4,096 B to 2,048 B, saving 4 KB. Not worth the risk while
+   184 KB of SRAM is free.
+4. **Debugging options:** shell, logging, thread names and the stack
+   sentinel cost RAM (the 2 KB shell stack and its buffers) and flash
+   (shell about 15 KB, log strings). Turn them off for a release build;
+   the measurements above need the shell, so keep them during
+   development.
+5. **Network limits:** `CONFIG_NET_MAX_CONN` and
    `CONFIG_NET_MAX_CONTEXTS` (10 each) are sized for the HTTP server with
-   3 clients; lowering them shrinks the TCP slab and context table.
+   3 clients; lowering them shrinks the 6.8 KB TCP slab and the context
+   table.
 
-There is no pressure to do any of this yet: 184 KB of SRAM and over 7 MB
-of flash are still free.
+There is no memory pressure: 184 KB of SRAM and over 7 MB of flash are
+still free.

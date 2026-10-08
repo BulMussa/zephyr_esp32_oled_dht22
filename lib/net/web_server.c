@@ -10,6 +10,7 @@
 #include "animation.h"
 #include "temperature.h"
 #include "web_server.h"
+#include "wifi_ap.h"
 
 /*
  * Resources:
@@ -59,6 +60,7 @@ static int status_handler(struct http_client_ctx *client, enum http_transaction_
 			  struct http_response_ctx *response_ctx, void *user_data)
 {
 	if (status == HTTP_SERVER_REQUEST_DATA_FINAL) {
+		wifi_ap_note_activity();
 		response_ctx->body = (const uint8_t *)json_buf;
 		response_ctx->body_len = format_status();
 		response_ctx->final_chunk = true;
@@ -102,6 +104,8 @@ static int animation_handler(struct http_client_ctx *client, enum http_transacti
 	if (status != HTTP_SERVER_REQUEST_DATA_FINAL) {
 		return 0;
 	}
+
+	wifi_ap_note_activity();
 
 	id = animation_find(body, body_len);
 	body_len = 0;

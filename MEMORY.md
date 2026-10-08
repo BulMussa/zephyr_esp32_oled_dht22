@@ -2,26 +2,36 @@
 
 Static analysis of the build for `esp32c6_devkitc/esp32c6/hpcore`
 (ESP32-C6, 512 KB SRAM, 8 MB flash), from the linker output, `zephyr.map`
-and the symbol table of `build/zephyr/zephyr.elf`. Measured on 2026-10-08
-with the debugging options in `prj.conf` enabled (logging, shell, stack
-sentinel).
+and the symbol table of `build/zephyr/zephyr.elf`, plus measurements on
+the board. Measured on 2026-10-08 with the debugging options in `prj.conf`
+enabled (logging, shell, stack sentinel).
+
+Current configuration: one Wi-Fi device at a time, 96 KB heap. The
+per-component and per-symbol tables below come from the first analysis
+(128 KB heap); apart from the heap and the system work queue stack, the
+code and data sizes changed by less than 1.5 KB since then.
 
 ## Summary
 
 | Memory | Used | Size | Used % | Free |
 | ------ | ---: | ---: | -----: | ---: |
-| Flash (firmware image) | 744,852 B (727 KB) | 8 MB | 8.9 % | ~7.3 MB |
-| SRAM (`sram0_0_seg`) | 320,608 B (313 KB) | 509,456 B (497.5 KB) | 62.9 % | 188,848 B (184 KB) |
+| Flash (firmware image) | 745,140 B (728 KB) | 8 MB | 8.9 % | ~7.3 MB |
+| SRAM (`sram0_0_seg`) | 288,928 B (282 KB) | 509,456 B (497.5 KB) | 56.7 % | 220,528 B (215 KB) |
 | LP RAM (`lp_ram_seg`) | 0 B | 15,584 B | 0 % | all |
 
-The SRAM figure counts the whole 128 KB heap as used. Measured on the
-board, the heap peaks at 48.8 KB with a phone connected, and every thread
-stack stays at or below 80 % (see
+The SRAM figure counts the whole 96 KB heap as used. Measured on the
+board, the heap peaks at 48.1 KB (49 %) with a phone connected, and every
+thread stack stays at or below 61 % (see
 [Runtime measurements](#runtime-measurements)).
+
+| Change | SRAM used |
+| ------ | --------: |
+| 128 KB heap, up to 5 devices | 320,608 B (62.9 %) |
+| 96 KB heap, 1 device, 3 KB system work queue | 288,928 B (56.7 %) |
 
 ## Flash
 
-The firmware image is 744,852 bytes. With `CONFIG_ESP_SIMPLE_BOOT` there is
+The firmware image is 745,140 bytes. With `CONFIG_ESP_SIMPLE_BOOT` there is
 no MCUboot: the single image is written at flash address `0x0` and the
 ROM bootloader starts it directly.
 
@@ -85,22 +95,25 @@ fit a 1,792 KB slot; at 727 KB it uses 41 % of one.
 
 | Section | Size | Contents |
 | ------- | ---: | -------- |
-| `.dram0.noinit` | 181,708 B | Heap, thread stacks, network buffers (not zeroed at boot) |
+| `.dram0.noinit` | 149,964 B | Heap, thread stacks, network buffers (not zeroed at boot) |
 | `.iram0.text` | 84,148 B | Code that must run from RAM: interrupt handlers, kernel, Wi-Fi hot paths, flash driver |
-| `.dram0.bss` | 35,264 B | Zero-initialized variables |
-| `.dram0.data` | 14,912 B | Initialized variables (mostly Wi-Fi/PHY tables) |
+| `.dram0.bss` | 35,280 B | Zero-initialized variables |
+| `.dram0.data` | 14,960 B | Initialized variables (mostly Wi-Fi/PHY tables) |
 | `.loader.*` | 3,184 B | Boot loader code and data |
-| **Total** | **≈ 313 KB** | |
+| **Total** | **≈ 282 KB** | |
 
-### Heap: 131,172 B (40 % of used SRAM)
+### Heap: 98,404 B (34 % of used SRAM)
 
-`CONFIG_HEAP_MEM_POOL_SIZE=131072`. Raised from the 55 KB default because
-the Wi-Fi driver ran out of memory and halted the chip when a phone
-connected. The Wi-Fi driver allocates from it at runtime: its own task
-stacks (`CONFIG_DYNAMIC_THREAD_ALLOC`), per-station state, WPA2 handshake
-buffers and up to 32 dynamic RX and 32 dynamic TX buffers.
+`CONFIG_HEAP_MEM_POOL_SIZE=98304` (96 KB). The 55 KB default was too
+small: the Wi-Fi driver ran out of memory and halted the chip when a phone
+connected. It was first raised to 128 KB, then lowered to 96 KB after the
+access point was limited to one device and the peak was measured. The
+Wi-Fi driver allocates from it at runtime: its own task stack
+(`CONFIG_DYNAMIC_THREAD_ALLOC`), per-station state, WPA2 handshake
+buffers and up to 32 dynamic RX and 32 dynamic TX buffers of about
+1.6 KB each.
 
-### Thread stacks: 29,696 B (29 KB)
+### Thread stacks: 30,720 B (30 KB)
 
 | Thread | Stack | Set by |
 | ------ | ----: | ------ |
@@ -110,7 +123,7 @@ buffers and up to 32 dynamic RX and 32 dynamic TX buffers.
 | HTTP server | 3,072 B | `CONFIG_HTTP_SERVER_STACK_SIZE` (default) |
 | Network RX (`rx_stack`) | 2,048 B | `CONFIG_NET_RX_STACK_SIZE` (Wi-Fi driver default) |
 | TCP work queue (`work_q_stack`) | 2,048 B | `CONFIG_NET_TCP_WORKQ_STACK_SIZE` |
-| System work queue | 2,048 B | `CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE` |
+| System work queue (also runs the Wi-Fi idle check) | 3,072 B | `CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE` |
 | Wi-Fi event thread | 2,048 B | Zephyr ESP32 Wi-Fi driver |
 | Shell | 2,048 B | Shell default |
 | Interrupts | 2,048 B | `CONFIG_ISR_STACK_SIZE` |
@@ -144,16 +157,43 @@ Measured on the board on 2026-10-08 with the shell on the USB console
 - `kernel thread stacks`: size and peak use per thread. Needs
   `CONFIG_INIT_STACKS` and `CONFIG_THREAD_STACK_INFO`.
 
-Two readings: **idle** 25 s after boot with no device connected, and
-**after use** at 165 s, after one phone joined Poko (WPA2), loaded the
-web page several times, switched the animation and kept the page open
-with its 3 s status polling. Peaks are since boot, so the second reading
-covers the whole session.
+Each test has two readings: **idle**, about 25 s after boot with no
+device connected, and **after use**, after one phone joined Poko (WPA2),
+loaded the web page several times, switched the animation and kept the
+page open with its 3 s status polling. Peaks are since boot, so the
+second reading covers the whole session.
 
-### Heap (128 KB pool)
+### Current build: 96 KB heap, one device
 
-| | Idle | After use |
-| - | ---: | --------: |
+Second test also covered: a second device trying to join (refused) and
+the phone being disconnected after 60 s without activity.
+
+| Heap | Idle | After use |
+| ---- | ---: | --------: |
+| Allocated now | 40,772 B | 40,988 B |
+| Peak allocated | 41,644 B | **48,084 B (49 %)** |
+| Free now | 57,200 B | 56,956 B |
+
+| Thread | Size | Peak use after use |
+| ------ | ---: | -----------------: |
+| `net_socket_service` (DHCP server) | 4,096 B | 2,512 B (61 %) |
+| `shell_uart` | 2,048 B | 1,244 B (60 %) |
+| `wifi` (Espressif, from heap) | 3,584 B | 2,108 B (58 %) |
+| `rx_q[0]` (network RX) | 2,048 B | 1,112 B (54 %) |
+| `sysworkq` (system work queue, idle check) | 3,072 B | 1,640 B (53 %) |
+| `http_server_tid` | 3,072 B | 1,560 B (50 %) |
+| `idle` | 512 B | 172 B (33 %) |
+| `esp32_wifi_event_tid` | 2,048 B | 612 B (29 %) |
+| `net_mgmt` (event handler) | 4,096 B | 1,108 B (27 %) |
+| `esp_timer` | 1,536 B | 364 B (23 %) |
+| `main` (display loop) | 4,096 B | 980 B (23 %) |
+| `IRQ 00` (interrupts) | 2,048 B | 340 B (16 %) |
+| `tcp_work` | 2,048 B | 276 B (13 %) |
+
+### Earlier build: 128 KB heap, up to 5 devices
+
+| Heap | Idle | After use |
+| ---- | ---: | --------: |
 | Allocated now | 40,772 B | 40,960 B |
 | Peak allocated | 43,060 B | **49,924 B (38 %)** |
 | Free now | 89,968 B | 89,760 B |
@@ -162,11 +202,9 @@ About 40 KB is allocated permanently once Wi-Fi is up (the Wi-Fi task
 stack, driver buffers and state). A connecting phone adds about 7 KB at
 peak (WPA2 handshake, station state, packet buffers).
 
-The previous 55,576 B default heap left only about 5.6 KB above this
+The original 55,576 B default heap left only about 5.6 KB above this
 peak, before allocator overhead and fragmentation, which is why the chip
 halted when a phone connected.
-
-### Thread stacks (peak use)
 
 | Thread | Size | Idle | After use | Old default |
 | ------ | ---: | ---: | --------: | ----------: |
@@ -190,17 +228,14 @@ confirming the stack overflow risk found during the connection crash.
 
 ## Conclusions
 
-1. **Heap:** 128 KB is about 2.5 times the measured peak. It could go
-   down to about 80 KB, but the access point allows up to 5 stations and
-   each one adds heap use, so keep it at 128 KB unless the RAM is
-   needed elsewhere. Re-measure with several phones connected before
-   lowering it.
-2. **System work queue:** at 80 % it has the least headroom of any
-   thread (408 B left). Raise `CONFIG_SYSTEM_WORKQUEUE_STACK_SIZE` to
-   3,072 B to keep at least 25 % free with more clients.
-3. **Oversized stacks:** `main` (20 %) and `net_mgmt` (25 %) could each
-   drop from 4,096 B to 2,048 B, saving 4 KB. Not worth the risk while
-   184 KB of SRAM is free.
+1. **Heap:** 96 KB is twice the measured peak with the one device the
+   access point allows. The remaining 47 KB covers bursts of Wi-Fi
+   receive buffers and fragmentation. Going lower (e.g. 72 KB) would
+   need a stress test with heavy traffic first.
+2. **Stacks:** every thread keeps at least 39 % of its stack free. The
+   system work queue went from 80 % to 53 % with its new 3,072 B stack.
+3. **Oversized stacks:** `main` (23 %) and `net_mgmt` (27 %) could each
+   drop from 4,096 B to 2,048 B, saving 4 KB. Left unchanged on purpose.
 4. **Debugging options:** shell, logging, thread names and the stack
    sentinel cost RAM (the 2 KB shell stack and its buffers) and flash
    (shell about 15 KB, log strings). Turn them off for a release build;
@@ -208,8 +243,8 @@ confirming the stack overflow risk found during the connection crash.
    development.
 5. **Network limits:** `CONFIG_NET_MAX_CONN` and
    `CONFIG_NET_MAX_CONTEXTS` (10 each) are sized for the HTTP server with
-   3 clients; lowering them shrinks the 6.8 KB TCP slab and the context
-   table.
+   3 clients; with one device they could be lowered to shrink the 6.8 KB
+   TCP slab and the context table.
 
-There is no memory pressure: 184 KB of SRAM and over 7 MB of flash are
+There is no memory pressure: 215 KB of SRAM and over 7 MB of flash are
 still free.

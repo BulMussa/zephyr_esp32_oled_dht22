@@ -7,7 +7,10 @@
 #include <zephyr/net/net_ip.h>
 #include <zephyr/net/net_mgmt.h>
 #include <zephyr/net/wifi_mgmt.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/printk.h>
+
+#include <esp_wifi.h>
 
 #include "wifi_ap.h"
 
@@ -21,7 +24,49 @@ BUILD_ASSERT(sizeof(WIFI_AP_PSK) - 1 >= 8 && sizeof(WIFI_AP_PSK) - 1 <= 63,
 	(NET_EVENT_WIFI_AP_ENABLE_RESULT | NET_EVENT_WIFI_AP_STA_CONNECTED |               \
 	 NET_EVENT_WIFI_AP_STA_DISCONNECTED)
 
+/* How often the idle timeout is checked while a device is connected */
+#define IDLE_CHECK_INTERVAL K_SECONDS(5)
+
 static struct net_mgmt_event_callback wifi_cb;
+
+/* Number of connected devices and uptime (ms, 32 bit) of the last activity */
+static atomic_t station_count;
+static atomic_t last_activity;
+
+static void idle_check(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(idle_work, idle_check);
+
+void wifi_ap_note_activity(void)
+{
+	atomic_set(&last_activity, (atomic_val_t)k_uptime_get_32());
+}
+
+/* Runs on the system work queue while a device is connected. */
+static void idle_check(struct k_work *work)
+{
+	uint32_t idle_ms;
+	esp_err_t err;
+
+	if (atomic_get(&station_count) == 0) {
+		return;
+	}
+
+	idle_ms = k_uptime_get_32() - (uint32_t)atomic_get(&last_activity);
+	if (idle_ms >= WIFI_AP_IDLE_TIMEOUT_S * MSEC_PER_SEC) {
+		printk("No activity for %u s, disconnecting device\n", idle_ms / MSEC_PER_SEC);
+
+		/* AID 0 disconnects all stations; there is at most one */
+		err = esp_wifi_deauth_sta(0);
+		if (err == ESP_OK) {
+			/* The disconnect event stops the checks */
+			return;
+		}
+
+		printk("Disconnecting device failed: %d\n", err);
+	}
+
+	k_work_reschedule(&idle_work, IDLE_CHECK_INTERVAL);
+}
 
 static void wifi_event_handler(struct net_mgmt_event_callback *cb, uint64_t event,
 			       struct net_if *iface)
@@ -35,10 +80,19 @@ static void wifi_event_handler(struct net_mgmt_event_callback *cb, uint64_t even
 	case NET_EVENT_WIFI_AP_STA_CONNECTED:
 		printk("Device joined: %02X:%02X:%02X:%02X:%02X:%02X\n", sta->mac[0],
 		       sta->mac[1], sta->mac[2], sta->mac[3], sta->mac[4], sta->mac[5]);
+
+		/* The idle timeout starts when the device joins */
+		wifi_ap_note_activity();
+		atomic_inc(&station_count);
+		k_work_reschedule(&idle_work, IDLE_CHECK_INTERVAL);
 		break;
 	case NET_EVENT_WIFI_AP_STA_DISCONNECTED:
 		printk("Device left: %02X:%02X:%02X:%02X:%02X:%02X\n", sta->mac[0],
 		       sta->mac[1], sta->mac[2], sta->mac[3], sta->mac[4], sta->mac[5]);
+
+		if (atomic_get(&station_count) > 0 && atomic_dec(&station_count) == 1) {
+			k_work_cancel_delayable(&idle_work);
+		}
 		break;
 	default:
 		break;
@@ -76,6 +130,36 @@ static int setup_ip(struct net_if *iface)
 	return 0;
 }
 
+/*
+ * Apply AP settings that the Zephyr Wi-Fi API does not offer for the ESP32:
+ * the driver always allows 5 stations, and Wi-Fi inactivity defaults to 300 s.
+ * Must be called after the AP is started.
+ */
+static int apply_esp_ap_settings(void)
+{
+	wifi_config_t config;
+	esp_err_t err;
+
+	err = esp_wifi_get_config(WIFI_IF_AP, &config);
+	if (err != ESP_OK) {
+		return -EIO;
+	}
+
+	config.ap.max_connection = WIFI_AP_MAX_STATIONS;
+
+	err = esp_wifi_set_config(WIFI_IF_AP, &config);
+	if (err != ESP_OK) {
+		return -EIO;
+	}
+
+	err = esp_wifi_set_inactive_time(WIFI_IF_AP, WIFI_AP_IDLE_TIMEOUT_S);
+	if (err != ESP_OK) {
+		return -EIO;
+	}
+
+	return 0;
+}
+
 int wifi_ap_start(void)
 {
 	struct net_if *iface = net_if_get_wifi_sap();
@@ -105,6 +189,12 @@ int wifi_ap_start(void)
 	ret = net_mgmt(NET_REQUEST_WIFI_AP_ENABLE, iface, &params, sizeof(params));
 	if (ret < 0) {
 		printk("Wi-Fi AP enable failed: %d\n", ret);
+		return ret;
+	}
+
+	ret = apply_esp_ap_settings();
+	if (ret < 0) {
+		printk("Wi-Fi AP settings failed: %d\n", ret);
 		return ret;
 	}
 

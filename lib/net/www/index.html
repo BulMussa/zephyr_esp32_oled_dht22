@@ -129,7 +129,7 @@ function updateButton() {
 
 function setLink(ok) {
   $("dot").className = "dot " + (ok ? "on" : "off");
-  $("link").textContent = ok ? "Connected" : "No connection to Poko";
+  $("link").textContent = ok ? "Connected" : "Disconnected. Rejoin Poko Wi-Fi";
 }
 
 function applyStatus(st) {
@@ -157,8 +157,23 @@ function poll() {
 setInterval(function () {
   if (uptimeBase) $("uptime").textContent = fmtUptime(uptimeBase.ms + Date.now() - uptimeBase.at);
 }, 250);
-setInterval(poll, 3000);
-poll();
+// Only poll while the page is visible. A hidden page (other app in front,
+// screen off) sends nothing, so Poko disconnects the phone after 60 s idle.
+var pollTimer = null;
+function startPolling() {
+  if (pollTimer === null) {
+    poll();
+    pollTimer = setInterval(poll, 3000);
+  }
+}
+function stopPolling() {
+  clearInterval(pollTimer);
+  pollTimer = null;
+}
+document.addEventListener("visibilitychange", function () {
+  if (document.hidden) stopPolling(); else startPolling();
+});
+if (!document.hidden) startPolling();
 
 document.querySelectorAll('input[name="anim"]').forEach(function (r) {
   r.addEventListener("change", function () {
